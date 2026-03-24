@@ -4,6 +4,8 @@ A standalone **Israeli Home Front Command (Pikud HaOref)** real-time alert monit
 
 No Home Assistant, no external server — just plug in and it works.
 
+![Display showing SAFE](images/display_safe.jpg)
+
 ---
 
 ## ✨ Features
@@ -64,6 +66,12 @@ with the USB connector on the **right side** of the assembled display.
 └────────┴────────┴────────┴────────┘
                                    [USB]
 ```
+
+### Assembly Photos
+
+| Back — full assembly | Back — ESP8266 & button | Back — USB connector |
+|:---:|:---:|:---:|
+| ![Full back view](images/back_full_assembly.jpg) | ![ESP8266 and config button](images/back_esp8266_button.jpg) | ![USB connector wiring](images/back_usb_connector.jpg) |
 
 ---
 
