@@ -8,13 +8,13 @@
 #include <Preferences.h>
 
 // ─── Display ──────────────────────────────────────────────────────────────────
-#define DATA_PIN    5
+#define DATA_PIN    3
 #define NUM_LEDS    256
 
 uint8_t matrixBrightness = 20;  // 1–100, loaded from Preferences
 
 // ─── Button ───────────────────────────────────────────────────────────────────
-#define BUTTON_PIN    4     // GPIO4 → connect to GND, internal pull-up
+#define BUTTON_PIN    10     // GPIO10 → connect to GND, internal pull-up
 #define LONG_PRESS_MS 3000
 
 CRGB leds[NUM_LEDS];
@@ -393,6 +393,7 @@ void setup() {
 
     // ── WiFiManager in its own scope so memory is freed when done ──────────────
     {
+        WiFi.mode(WIFI_STA);  // required on ESP32 before WiFiManager
         WiFiManager wm;
         wm.setConfigPortalTimeout(180);
 
@@ -423,10 +424,10 @@ void setup() {
         });
 
         wm.setAPCallback([](WiFiManager*) {
-            drawCentered("CONFIG", CRGB(0, 0, 60));
+            drawCentered("CONF", CRGB(0, 0, 60));  // CONFIG is 41px > 32px display width
         });
 
-        drawCentered(forcePortal ? "CONFIG" : "WIFI", CRGB(0, 0, 60));
+        drawCentered(forcePortal ? "CONF" : "WIFI", CRGB(0, 0, 60));
 
         bool connected = forcePortal
             ? wm.startConfigPortal("RedAlert-Setup")
