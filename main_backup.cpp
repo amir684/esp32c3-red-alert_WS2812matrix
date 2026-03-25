@@ -75,15 +75,13 @@ const uint8_t* getGlyph(char c) {
 void drawText(const char* text, int xOffset, CRGB color) {
     FastLED.clear();
     for (int i = 0; text[i]; i++) {
-        int cx = xOffset + i * 7;   // step=7 to fit the extra bold pixel
+        int cx = xOffset + i * 6;
         const uint8_t* g = getGlyph(text[i]);
         for (int col = 0; col < 5; col++) {
             uint8_t data = g[col];
             for (int row = 0; row < 7; row++) {
-                if (data & (1 << row)) {
-                    setPixel(cx + col,     row, color);
-                    setPixel(cx + col + 1, row, color); // bold: duplicate right
-                }
+                if (data & (1 << row))
+                    setPixel(cx + col, row, color);
             }
         }
     }
@@ -124,7 +122,7 @@ void setColor(uint8_t r, uint8_t g, uint8_t b) {
 void showStatic(const char* text) {
     isScrolling = false;
     int len    = strlen(text);
-    int totalW = len * 7 - 1;
+    int totalW = len * 6 - 1;
     int x      = (32 - totalW) / 2;
     drawText(text, x, currentColor);
 }
@@ -427,7 +425,7 @@ void loop() {
     // --- Scroll animation ---
     if (isScrolling && millis() - lastScrollStep >= SCROLL_STEP_MS) {
         lastScrollStep = millis();
-        int textW = strlen(scrollText) * 7;
+        int textW = strlen(scrollText) * 6;
         scrollOffset--;
         if (scrollOffset < -textW) scrollOffset = 32;
         drawText(scrollText, scrollOffset, currentColor);
