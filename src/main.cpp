@@ -6,6 +6,7 @@
 #include <ArduinoJson.h>
 #include <FastLED.h>
 #include <Preferences.h>
+#include "esp_wifi.h"
 
 // ===================== PIN CONFIG =====================
 #define DATA_PIN        3     // GPIO3  -> WS2812 matrix data
@@ -13,6 +14,7 @@
 
 #define BUTTON_PIN      10     // GPIO10  -> config button (connect to GND)
 #define LONG_PRESS_MS   3000
+#define PORTAL_PASSWORD "12345678"
 
 // ===================== CONSTANTS =====================
 #define ALERT_URL       "https://www.oref.org.il/warningMessages/alert/Alerts.json"
@@ -21,6 +23,8 @@
 #define SAFE_TIMEOUT_MS (20UL * 60 * 1000)
 #define API_FAIL_MAX    5     // consecutive failures before NO API shown
 #define SCROLL_STEP_MS  40    // ms between scroll pixels
+#define BOUNCE_STEP_MS  100   // ms between bounce pixels
+#define BOUNCE_PAUSE_MS 1200  // ms pause at each end
 
 // ===================== OBJECTS =====================
 CRGB leds[NUM_LEDS];
@@ -90,6 +94,7 @@ void drawText(const char* text, int xOffset, CRGB color) {
     FastLED.show();
 }
 
+
 // ===================== STATE =====================
 enum AlertState { SAFE, PRE_ALARM, ALARM, UNSAFE, NO_API, BAD_CITY };
 
@@ -116,6 +121,14 @@ int  scrollOffset   = 32;
 bool isScrolling    = false;
 unsigned long lastScrollStep = 0;
 
+char          bounceText[64]  = "";
+int           bounceX         = 0;
+int           bounceDir       = -1;
+bool          isBouncing      = false;
+bool          bouncePaused    = false;
+unsigned long lastBounceStep  = 0;
+unsigned long bouncePauseEnd  = 0;
+
 void setColor(uint8_t r, uint8_t g, uint8_t b) {
     currentColor = CRGB(r, g, b);
 }
@@ -123,20 +136,59 @@ void setColor(uint8_t r, uint8_t g, uint8_t b) {
 // Draw text centered on the 32px-wide matrix
 void showStatic(const char* text) {
     isScrolling = false;
+    isBouncing  = false;
     int len    = strlen(text);
     int totalW = len * 7 - 1;
     int x      = (32 - totalW) / 2;
     drawText(text, x, currentColor);
 }
 
+// Thin (non-bold) text, step=6 — for longer words that don't fit with bold
+void drawTextThin(const char* text, int xOffset, CRGB color) {
+    FastLED.clear();
+    for (int i = 0; text[i]; i++) {
+        int cx = xOffset + i * 6;
+        const uint8_t* g = getGlyph(text[i]);
+        for (int col = 0; col < 5; col++) {
+            uint8_t data = g[col];
+            for (int row = 0; row < 7; row++) {
+                if (data & (1 << row)) setPixel(cx + col, row, color);
+            }
+        }
+    }
+    FastLED.show();
+}
+
+void showStaticThin(const char* text) {
+    isScrolling = false;
+    isBouncing  = false;
+    int totalW  = strlen(text) * 6 - 1;
+    int x       = (32 - totalW) / 2;
+    drawTextThin(text, x, currentColor);
+}
+
 // Queue text for scrolling (driven by loop)
 void showScroll(const char* text) {
+    isBouncing     = false;
     strncpy(scrollText, text, sizeof(scrollText) - 1);
     scrollText[sizeof(scrollText) - 1] = '\0';
     isScrolling    = true;
     scrollOffset   = 32;
     lastScrollStep = millis();
     drawText(scrollText, scrollOffset, currentColor);
+}
+
+// Bounce thin text left↔right so off-screen edges become visible
+void showBounce(const char* text) {
+    isScrolling = false;
+    strncpy(bounceText, text, sizeof(bounceText) - 1);
+    bounceText[sizeof(bounceText) - 1] = '\0';
+    isBouncing     = true;
+    bounceX        = 0;          // start at left-aligned (right edge clips)
+    bounceDir      = -1;         // move left first
+    bouncePaused   = true;
+    bouncePauseEnd = millis() + BOUNCE_PAUSE_MS;
+    drawTextThin(bounceText, bounceX, currentColor);
 }
 
 // ===================== URL DECODE =====================
@@ -169,19 +221,19 @@ void applyState(AlertState state) {
             break;
 
         case PRE_ALARM:
-            setColor(150, 47, 0);       // Orange solid
-            showStatic("UNSAFE");
+            setColor(150, 47, 0);       // Orange bounce
+            showBounce("UNSAFE");
             break;
 
         case ALARM:
             blinkOn = true;
-            setColor(200, 0, 0);        // Red flicker (handled in loop)
-            showStatic("ALERT");
+            setColor(250, 0, 0);        // Red flicker (handled in loop)
+            showStaticThin("ALERT");
             break;
 
         case UNSAFE:
-            setColor(150, 47, 0);       // Orange solid
-            showStatic("UNSAFE");
+            setColor(200, 63, 0);       // Orange bounce
+            showBounce("UNSAFE");
             break;
 
         case NO_API:
@@ -361,9 +413,16 @@ void setup() {
     showStatic(forcePortal ? "SETUP" : "WIFI");
     wm.setConfigPortalTimeout(180);
 
+    // WiFi init sequence required for ESP32-C3 + IDF 5.x
+    WiFi.disconnect(true);
+    delay(1000);
+    WiFi.mode(WIFI_AP);
+    delay(500);
+    esp_wifi_set_country_code("IL", true);
+
     bool connected = forcePortal
-        ? wm.startConfigPortal("RedAlert-Setup")
-        : wm.autoConnect("RedAlert-Setup");
+        ? wm.startConfigPortal("RedAlert-Setup", PORTAL_PASSWORD)
+        : wm.autoConnect("RedAlert-Setup", PORTAL_PASSWORD);
 
     if (!connected) {
         Serial.println("[Setup] Portal timeout — restarting");
@@ -387,13 +446,26 @@ AlertState    lastDisplayState = SAFE;
 unsigned long btnPressTime     = 0;
 bool          btnWasPressed    = false;
 
+// Demo mode (short press cycles all states)
+const AlertState DEMO_STATES[] = { SAFE, PRE_ALARM, ALARM, UNSAFE, NO_API, BAD_CITY };
+bool             demoMode      = false;
+int              demoIdx       = 0;
+unsigned long    demoTimer     = 0;
+
 void loop() {
-    // --- Long press: trigger config portal ---
+    // --- Button handling ---
     bool btnPressed = (digitalRead(BUTTON_PIN) == LOW);
     if (btnPressed && !btnWasPressed) {
         btnPressTime  = millis();
         btnWasPressed = true;
     } else if (!btnPressed) {
+        if (btnWasPressed && millis() - btnPressTime < LONG_PRESS_MS) {
+            Serial.println("[Button] Short press -> demo mode");
+            demoMode  = true;
+            demoIdx   = 0;
+            demoTimer = millis();
+            applyState(DEMO_STATES[0]);
+        }
         btnWasPressed = false;
     } else if (btnPressed && millis() - btnPressTime >= LONG_PRESS_MS) {
         Serial.println("[Button] Long press -> portal on next boot");
@@ -401,6 +473,51 @@ void loop() {
         preferences.putBool("portal", true);
         preferences.end();
         ESP.restart();
+    }
+
+    // --- Demo mode ---
+    if (demoMode) {
+        AlertState curDemo = DEMO_STATES[demoIdx];
+        if (millis() - demoTimer >= 3000) {
+            demoIdx++;
+            if (demoIdx >= (int)(sizeof(DEMO_STATES) / sizeof(DEMO_STATES[0]))) {
+                demoMode         = false;
+                lastDisplayState = (AlertState)255; // force re-apply on exit
+            } else {
+                demoTimer = millis();
+                applyState(DEMO_STATES[demoIdx]);
+                curDemo = DEMO_STATES[demoIdx];
+            }
+        }
+        if (demoMode) {
+            if (isScrolling && millis() - lastScrollStep >= SCROLL_STEP_MS) {
+                lastScrollStep = millis();
+                int textW = strlen(scrollText) * 7;
+                scrollOffset--;
+                if (scrollOffset < -textW) scrollOffset = 32;
+                drawText(scrollText, scrollOffset, currentColor);
+            }
+            if (isBouncing) {
+                int totalW = strlen(bounceText) * 6 - 1;
+                int xMin = -(totalW - 32), xMax = 0;
+                if (bouncePaused) {
+                    if (millis() >= bouncePauseEnd) bouncePaused = false;
+                } else if (millis() - lastBounceStep >= BOUNCE_STEP_MS) {
+                    lastBounceStep = millis();
+                    bounceX += bounceDir;
+                    if (bounceX <= xMin) { bounceX = xMin; bounceDir = 1; bouncePaused = true; bouncePauseEnd = millis() + BOUNCE_PAUSE_MS; }
+                    else if (bounceX >= xMax) { bounceX = xMax; bounceDir = -1; bouncePaused = true; bouncePauseEnd = millis() + BOUNCE_PAUSE_MS; }
+                    drawTextThin(bounceText, bounceX, currentColor);
+                }
+            }
+            if (curDemo == ALARM && millis() - lastBlink >= 60) {
+                lastBlink    = millis();
+                blinkOn      = !blinkOn;
+                currentColor = blinkOn ? CRGB(255, 0, 0) : CRGB::Black;
+                drawTextThin("ALERT", 2, currentColor);
+            }
+            return;
+        }
     }
 
     // --- Compute display state ---
@@ -432,12 +549,33 @@ void loop() {
         drawText(scrollText, scrollOffset, currentColor);
     }
 
+    // --- Bounce animation ---
+    if (isBouncing) {
+        int totalW = strlen(bounceText) * 6 - 1;
+        int xMin   = -(totalW - 32);   // right-aligned: left edge clips
+        int xMax   = 0;                // left-aligned:  right edge clips
+        if (bouncePaused) {
+            if (millis() >= bouncePauseEnd) bouncePaused = false;
+        } else if (millis() - lastBounceStep >= BOUNCE_STEP_MS) {
+            lastBounceStep = millis();
+            bounceX += bounceDir;
+            if (bounceX <= xMin) {
+                bounceX = xMin; bounceDir = 1;
+                bouncePaused = true; bouncePauseEnd = millis() + BOUNCE_PAUSE_MS;
+            } else if (bounceX >= xMax) {
+                bounceX = xMax; bounceDir = -1;
+                bouncePaused = true; bouncePauseEnd = millis() + BOUNCE_PAUSE_MS;
+            }
+            drawTextThin(bounceText, bounceX, currentColor);
+        }
+    }
+
     // --- LED effects ---
     // Fast flicker: ALARM — redraw text in toggled color
     if (displaySt == ALARM && millis() - lastBlink >= 60) {
         lastBlink    = millis();
         blinkOn      = !blinkOn;
         currentColor = blinkOn ? CRGB(255, 0, 0) : CRGB::Black;
-        drawText("ALERT", 1, currentColor);
+        drawTextThin("ALERT", 2, currentColor);   // x=2 centers "ALERT" (29px) on 32px
     }
 }
